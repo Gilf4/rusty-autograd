@@ -4,13 +4,6 @@ use std::rc::Rc;
 
 trait Operation {
     fn backward(&self, grad: &Array2<f64>, inputs: &[TensorRef]) -> Vec<Array2<f64>>;
-    fn clone_box(&self) -> Box<dyn Operation>;
-}
-
-impl Clone for Box<dyn Operation> {
-    fn clone(&self) -> Self {
-        self.clone_box()
-    }
 }
 
 #[derive(Clone)]
@@ -19,9 +12,6 @@ struct AddOp;
 impl Operation for AddOp {
     fn backward(&self, grad: &Array2<f64>, inputs: &[TensorRef]) -> Vec<Array2<f64>> {
         inputs.iter().map(|_| grad.clone()).collect()
-    }
-    fn clone_box(&self) -> Box<dyn Operation> {
-        Box::new(self.clone())
     }
 }
 
@@ -38,9 +28,6 @@ impl Operation for MatMulOp {
         let lhs = grad.dot(&b.t());
         let rhs = a.t().dot(grad);
         vec![lhs, rhs]
-    }
-    fn clone_box(&self) -> Box<dyn Operation> {
-        Box::new(self.clone())
     }
 }
 
@@ -59,21 +46,16 @@ impl Operation for ReLUOp {
 
         vec![output_grad]
     }
-
-    fn clone_box(&self) -> Box<dyn Operation> {
-        Box::new(self.clone())
-    }
 }
 
-#[derive(Clone)]
+type TensorRef = Rc<RefCell<Tensor>>;
+
 struct Tensor {
     data: Array2<f64>,
     grad: Array2<f64>,
     op: Option<Box<dyn Operation>>,
-    parents: Vec<Rc<RefCell<Tensor>>>,
+    parents: Vec<TensorRef>,
 }
-
-type TensorRef = Rc<RefCell<Tensor>>;
 
 impl Tensor {
     fn new(data: Array2<f64>) -> TensorRef {
@@ -155,42 +137,204 @@ impl Tensor {
     }
 }
 
+trait Module {
+    fn forward(&self, input: &TensorRef) -> TensorRef;
+
+    // Опционально: метод для сбора параметров (для optimizer в будущем)
+    fn parameters(&self) -> Vec<TensorRef> {
+        vec![]
+    }
+}
+
+// Аналог nn.Linear
+struct Linear {
+    weight: TensorRef,
+    bias: Option<TensorRef>,
+}
+
+impl Linear {
+    fn new(in_features: usize, out_features: usize, bias: bool) -> Self {
+        // Инициализация весов (для простоты — единицы, в реальности — random)
+        let weight_data = Array2::ones((in_features, out_features));
+        let weight = Tensor::new(weight_data);
+
+        let bias_tensor = if bias {
+            Some(Tensor::new(Array2::ones((1, out_features))))
+        } else {
+            None
+        };
+
+        Linear {
+            weight,
+            bias: bias_tensor,
+        }
+    }
+}
+
+impl Module for Linear {
+    fn forward(&self, input: &TensorRef) -> TensorRef {
+        let mut output = Tensor::mat_mul(input, &self.weight);
+        if let Some(b) = &self.bias {
+            output = Tensor::add(&output, b);
+        }
+        output
+    }
+
+    fn parameters(&self) -> Vec<TensorRef> {
+        let mut params = vec![Rc::clone(&self.weight)];
+        if let Some(b) = &self.bias {
+            params.push(Rc::clone(b));
+        }
+        params
+    }
+}
+
+struct ReLU;
+
+impl Module for ReLU {
+    fn forward(&self, input: &TensorRef) -> TensorRef {
+        Tensor::relu(input)
+    }
+}
+
+impl ReLU {
+    fn new() -> Self {
+        ReLU
+    }
+}
+
+struct Sequential {
+    layers: Vec<Box<dyn Module>>,
+}
+
+impl Sequential {
+    fn new(layers: Vec<Box<dyn Module>>) -> Self {
+        Sequential { layers }
+    }
+}
+
+impl Module for Sequential {
+    fn forward(&self, input: &TensorRef) -> TensorRef {
+        let mut current = Rc::clone(input);
+
+        for layer in &self.layers {
+            current = layer.forward(&current);
+        }
+
+        current
+    }
+
+    fn parameters(&self) -> Vec<TensorRef> {
+        self.layers
+            .iter()
+            .flat_map(|layer| layer.parameters())
+            .collect()
+    }
+}
+
 fn main() {
-    // Вход: batch_size=1, in_features=3
-    let x = Tensor::new(Array2::from_shape_fn((1, 3), |(_, j)| (j + 1) as f64));
-    // x = [[1.0, 2.0, 3.0]]
+    let model = Sequential::new(vec![
+        Box::new(Linear::new(2, 3, true)),
+        Box::new(ReLU::new()),
+        Box::new(Linear::new(3, 4, true)),
+    ]);
 
-    // Вес: in_features=3, out_features=2
-    let w = Tensor::new(Array2::from_shape_fn((3, 2), |(i, j)| {
-        (i * 2 + j + 1) as f64
-    }));
-    // w = [[1.0, 2.0],
-    //      [3.0, 4.0],
-    //      [5.0, 6.0]]
+    let x = Tensor::new(Array2::from_shape_fn((1, 2), |(_, j)| (j + 1) as f64));
 
-    // Bias: out_features=2
-    let b = Tensor::new(Array2::from_shape_fn((1, 2), |(_, j)| (j + 1) as f64));
-    // b = [[1.0, 2.0]]
+    let output = model.forward(&x);
 
-    // Прямой проход: y = x @ w + b
-    let xw = Tensor::mat_mul(&x, &w); // (1,3) @ (3,2) -> (1,2)
-    let y = Tensor::add(&xw, &b); // + bias broadcasting (ndarray поддерживает)
-    let z = Tensor::relu(&y); // ReLU
+    output.borrow_mut().set_init_grad();
+    output.borrow().backward();
 
-    // Задаём градиент на выходе (представим, что loss дал grad=1 для обоих выходов)
-    z.borrow_mut().set_init_grad(); // grad = [[1.0, 1.0]]
+    println!("Output: {:?}", output.borrow().data);
 
-    // Обратный проход
-    z.borrow().backward();
+    for param in model.parameters() {
+        println!("Param grad: {:?}", param.borrow().grad);
+    }
+}
 
-    // Проверяем градиенты
-    println!("Input x:\n{:?}", x.borrow().data);
-    println!("Weight w:\n{:?}", w.borrow().data);
-    println!("Bias b:\n{:?}", b.borrow().data);
-    println!("\nForward output z (after ReLU):\n{:?}", z.borrow().data);
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ndarray::array;
 
-    println!("\n=== Градиенты ===");
-    println!("grad wrt x:\n{:?}", x.borrow().grad);
-    println!("grad wrt w:\n{:?}", w.borrow().grad);
-    println!("grad wrt b:\n{:?}", b.borrow().grad);
+    #[test]
+    fn test_add_forward() {
+        let a = Tensor::new(array![[1.0, 2.0]]);
+        let b = Tensor::new(array![[3.0, 4.0]]);
+        let c = Tensor::add(&a, &b);
+        assert_eq!(c.borrow().data, array![[4.0, 6.0]]);
+    }
+
+    #[test]
+    fn test_add_backward() {
+        let a = Tensor::new(array![[1.0, 2.0]]);
+        let b = Tensor::new(array![[3.0, 4.0]]);
+        let c = Tensor::add(&a, &b);
+        c.borrow_mut().set_init_grad();
+        c.borrow().backward();
+        assert_eq!(a.borrow().grad, array![[1.0, 1.0]]);
+        assert_eq!(b.borrow().grad, array![[1.0, 1.0]]);
+    }
+
+    #[test]
+    fn test_matmul_forward() {
+        let a = Tensor::new(array![[1.0, 2.0, 3.0]]);
+        let b = Tensor::new(array![[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]);
+        let c = Tensor::mat_mul(&a, &b);
+        assert_eq!(c.borrow().data, array![[22.0, 28.0]]);
+    }
+
+    #[test]
+    fn test_matmul_backward() {
+        let a = Tensor::new(array![[1.0, 2.0, 3.0]]);
+        let b = Tensor::new(array![[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]);
+        let c = Tensor::mat_mul(&a, &b);
+        c.borrow_mut().set_init_grad();
+        c.borrow().backward();
+        assert_eq!(a.borrow().grad, array![[3.0, 7.0, 11.0]]); // grad * b^T
+        assert_eq!(b.borrow().grad, array![[1.0, 1.0], [2.0, 2.0], [3.0, 3.0]]); // a^T * grad
+    }
+
+    #[test]
+    fn test_relu_forward() {
+        let a = Tensor::new(array![[-1.0, 0.0, 2.0]]);
+        let b = Tensor::relu(&a);
+        assert_eq!(b.borrow().data, array![[0.0, 0.0, 2.0]]);
+    }
+
+    #[test]
+    fn test_relu_backward() {
+        let a = Tensor::new(array![[-1.0, 0.0, 2.0]]);
+        let b = Tensor::relu(&a);
+        b.borrow_mut().set_init_grad();
+        b.borrow().backward();
+        assert_eq!(a.borrow().grad, array![[0.0, 0.0, 1.0]]); // grad * mask
+    }
+
+    #[test]
+    fn test_full_forward_backward() {
+        let x = Tensor::new(array![[1.0, 2.0, 3.0]]);
+        let w = Tensor::new(array![[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]);
+        let b = Tensor::new(array![[1.0, 2.0]]);
+        let xw = Tensor::mat_mul(&x, &w);
+        let y = Tensor::add(&xw, &b);
+        let z = Tensor::relu(&y);
+        z.borrow_mut().set_init_grad();
+        z.borrow().backward();
+
+        assert_eq!(z.borrow().data, array![[23.0, 30.0]]);
+
+        assert_eq!(x.borrow().grad, array![[3.0, 7.0, 11.0]]);
+        assert_eq!(w.borrow().grad, array![[1.0, 1.0], [2.0, 2.0], [3.0, 3.0]]);
+        assert_eq!(b.borrow().grad, array![[1.0, 1.0]]);
+    }
+
+    #[test]
+    #[should_panic(expected = "expects exactly 2 inputs")]
+    fn test_matmul_panic_wrong_inputs() {
+        let a = Tensor::new(array![[1.0]]);
+        let op = MatMulOp;
+        op.backward(&array![[1.0]], &vec![a]);
+    }
 }

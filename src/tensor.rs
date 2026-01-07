@@ -1,14 +1,10 @@
+use crate::ops::Operation;
+use crate::ops::{AddOp, MatMulOp, MeanOp, PowOp, ReLUOp, SubOp, TanhOp};
 use ndarray::prelude::*;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use crate::ops::{AddOp, MatMulOp, MeanOp, PowOp, ReLUOp, SubOp};
-
 pub type TensorRef = Rc<RefCell<Tensor>>;
-
-pub trait Operation {
-    fn backward(&self, grad: &Array2<f64>, inputs: &[TensorRef]) -> Vec<Array2<f64>>;
-}
 
 pub struct Tensor {
     pub data: Array2<f64>,
@@ -126,6 +122,19 @@ impl Tensor {
             data,
             grad: Array2::zeros((nrows, ncols)),
             op: Some(Box::new(PowOp { exp })),
+            parents: vec![Rc::clone(a)],
+        }))
+    }
+
+    pub fn tanh(a: &TensorRef) -> TensorRef {
+        let a_borrow = a.borrow();
+        let data = a_borrow.data.mapv(|v| v.tanh());
+        let (nrows, ncols) = data.dim();
+
+        Rc::new(RefCell::new(Tensor {
+            data,
+            grad: Array2::zeros((nrows, ncols)),
+            op: Some(Box::new(TanhOp)),
             parents: vec![Rc::clone(a)],
         }))
     }

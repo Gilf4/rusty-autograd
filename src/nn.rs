@@ -1,5 +1,7 @@
 use crate::tensor::{Tensor, TensorRef};
 use ndarray::Array2;
+use rand::thread_rng;
+use rand_distr::{Distribution, Normal};
 use std::rc::Rc;
 
 pub trait Module {
@@ -16,12 +18,20 @@ pub struct Linear {
 
 impl Linear {
     pub fn new(in_features: usize, out_features: usize, bias: bool) -> Self {
-        let weight = Tensor::new(Array2::ones((in_features, out_features)));
+        let std = (2.0 / (in_features + out_features) as f64).sqrt();
+        let mut rng = thread_rng();
+        let normal = Normal::new(0.0, std).unwrap();
+
+        let weight =
+            Array2::from_shape_fn((in_features, out_features), |_| normal.sample(&mut rng));
+        let weight = Tensor::new(weight);
+
         let bias_tensor = if bias {
-            Some(Tensor::new(Array2::ones((1, out_features))))
+            Some(Tensor::new(Array2::zeros((1, out_features))))
         } else {
             None
         };
+
         Linear {
             weight,
             bias: bias_tensor,
@@ -48,9 +58,18 @@ impl Module for Linear {
 }
 
 pub struct ReLU;
+
 impl Module for ReLU {
     fn forward(&self, input: &TensorRef) -> TensorRef {
         Tensor::relu(input)
+    }
+}
+
+pub struct Tanh;
+
+impl Module for Tanh {
+    fn forward(&self, input: &TensorRef) -> TensorRef {
+        Tensor::tanh(input)
     }
 }
 

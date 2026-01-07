@@ -25,7 +25,6 @@ impl Optimizer for SGD {
     fn step(&mut self) {
         for param in &self.params {
             let mut p = param.borrow_mut();
-            // Basic SGD step: data = data - lr * grad
             p.data = &p.data - &(self.lr * &p.grad);
         }
     }
